@@ -15,6 +15,16 @@
  *
  ******************************************************************************
  */
+
+// Flash uses SPI3 - PC10=SCK, PC11=MISO, PC12=MOSI, PD2=CS
+// ADC uses PA0 with DMA, toggles PB0 Green LED
+// DAC uses PA4 with DMA, toggles PB7 Blue LED
+// Sample Timer triggers PD12
+// Process loop toggles RED LED on PB14
+// EXT_SRC_Pin uses PC0
+
+
+
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
@@ -32,8 +42,8 @@
 #include "FbComb.h"
 //#include "AllpassPhaser.h"
 #include "arm_IIR_AllpassPhaser.h"
-
 #include "lp1_coeffs.h"
+#include "sst26_flash.h"
 
 /* USER CODE END Includes */
 
@@ -60,14 +70,13 @@ DMA_HandleTypeDef hdma_adc1;
 DAC_HandleTypeDef hdac;
 DMA_HandleTypeDef hdma_dac1;
 
+SPI_HandleTypeDef hspi3;
+
 TIM_HandleTypeDef htim4;
 
 UART_HandleTypeDef huart3;
 
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
-
-static float32_t firStateF32[BLOCK_SIZE + FLT1_NUM_TAPS - 1];
-arm_fir_instance_f32 Flt1;
 
 /* USER CODE BEGIN PV */
 
@@ -117,12 +126,44 @@ static void MX_ADC1_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_DAC_Init(void);
 static void MX_TIM4_Init(void);
+static void MX_SPI3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+uint32_t SPI_xfer(uint32_t ui32Base, uint8_t* inTxData, uint8_t* inRxData, uint32_t inLength, int8_t inFssHold)
+{
+    // Assert EN low
+    if ((SPI_HOLD_ACTIVE == inFssHold) || (SPI_HOLD_CLR == inFssHold))
+    {
+    	HAL_GPIO_WritePin(MY_SPI3_CS_GPIO_Port, MY_SPI3_CS_Pin, GPIO_PIN_RESET);
+    }
+
+    if (inTxData && !inRxData) // only TX
+    {
+    	HAL_SPI_Transmit(&hspi3, inTxData, inLength, HAL_MAX_DELAY);
+    }
+    else if (!inTxData && inRxData) // only RX
+    {
+    	HAL_SPI_Receive(&hspi3, inRxData, inLength, HAL_MAX_DELAY);
+    }
+    else // Both Tx and Rx
+    {
+		HAL_SPI_TransmitReceive(&hspi3, inTxData, inRxData, inLength, HAL_MAX_DELAY);
+    }
+
+    // De-assert EN on last byte
+    if ((inFssHold == SPI_HOLD_CLR))
+    {
+        HAL_GPIO_WritePin(MY_SPI3_CS_GPIO_Port, MY_SPI3_CS_Pin, GPIO_PIN_SET);
+    }
+
+    return 0;
+}
+
 
 /* USER CODE END 0 */
 
@@ -162,6 +203,7 @@ int main(void)
   MX_USART3_UART_Init();
   MX_DAC_Init();
   MX_TIM4_Init();
+  MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
 
 /***
@@ -230,7 +272,15 @@ int main(void)
 	bool echo_complete = true;
 	bool flush_out = false;
 
-	/* Call FIR init function to initialize the instance structure. */
+	/* Call FIR init function to initialize the instance structure.
+	 * https://arm-software.github.io/CMSIS_5/DSP/html/arm_fir_example_f32_8c-example.html
+	 * */
+	arm_fir_instance_f32 Flt1;
+#if defined(ARM_MATH_MVEF) && !defined(ARM_MATH_AUTOVECTORIZE)
+	static float32_t firStateF32[2 * BLOCK_SIZE + NUM_TAPS - 1];
+#else
+	static float32_t firStateF32[BLOCK_SIZE + FLT1_NUM_TAPS - 1];
+#endif
 	arm_fir_init_f32(&Flt1, FLT1_NUM_TAPS, (float32_t *)&flt1_coeffs[0], &firStateF32[0], BLOCK_SIZE);
 
   /* USER CODE END 2 */
@@ -238,6 +288,14 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
+	typedef enum STATE_E {
+		STAGE_1 = 1,
+		STAGE_2 = 2,
+		STAGE_3 = 3,
+		STAGE_4 = 4
+	} STATE_E;
+
+	STATE_E state_e = STAGE_1;
 
     while (1)
     {
@@ -264,17 +322,18 @@ int main(void)
 			arm_negate_f32(ftmpdsp_buffer, dsp_buffer+buf_offset, BLOCK_SIZE);
 
 			// Power threshold check
-			if (th_reached == false && echo_stored == false && echo_complete)
+			if (state_e == STAGE_1)
 			{
 				arm_abs_f32(dsp_buffer+buf_offset, ftmpdsp_buffer, BLOCK_SIZE);
 				arm_max_f32(ftmpdsp_buffer, BLOCK_SIZE, &max_val, &max_index);
 				if (max_val >= max_threshold)
 				{
-					th_reached = true;
+					HAL_GPIO_WritePin(EXT_SRC_GPIO_Port, EXT_SRC_Pin, GPIO_PIN_SET);
+					state_e = STAGE_2;
 				}
 				max_val = 0;
 			}
-			if (th_reached == true)
+			if (state_e == STAGE_2)
 			{
 				for (size_t n = buf_offset+max_index; n < buf_offset+BLOCK_SIZE; n++)
 				{
@@ -282,9 +341,8 @@ int main(void)
 					// Fill the buffer
 					if (delay1.position == 0)
 					{
-						th_reached = false;
-						echo_stored = true;
-						echo_complete = false;
+						HAL_GPIO_WritePin(EXT_SRC_GPIO_Port, EXT_SRC_Pin, 0);
+						state_e = STAGE_3;
 						break;
 					}
 				}
@@ -306,7 +364,7 @@ int main(void)
 //			}
 
 			// END Signal Processing
-			if (echo_complete==false)
+			if (state_e == STAGE_3)
 			{
 				size_t k=0;
 				for (size_t n = buf_offset; n < buf_offset+BLOCK_SIZE; n++)
@@ -315,10 +373,7 @@ int main(void)
 					// Fill the buffer
 					if (delay1.position == 0)
 					{
-						th_reached = false;
-						echo_stored = false;
-						echo_complete = true;
-						flush_out = true;
+						state_e = STAGE_4;
 						break;
 					}
 				}
@@ -332,22 +387,16 @@ int main(void)
 			arm_scale_q15(tmpdsp_buffer, (q15_t)1, 11, tmpdsp_buffer2, BLOCK_SIZE);		// range is now from [-4096.0, 4096.0]/2
 			arm_offset_q15(tmpdsp_buffer2, 2048, dacBuffer+buf_offset, BLOCK_SIZE); // range is now 12-bits, from [0.0, 4096.0]
 
-			if (flush_out)
+			if (state_e == STAGE_4)
 			{
 				arm_fill_f32(0.0, out_buffer, BLOCK_SIZE);
-				flush_out = false;
+				state_e = STAGE_1;
 			}
 
 			HAL_GPIO_WritePin(GPIOB, LD3_Pin, GPIO_PIN_RESET);
 
-			if (ready_1)
-			{
-				ready_1 = false;
-			}
-			else if (ready_2)
-			{
-				ready_2 = false;
-			}
+			ready_1 ^= ready_1;
+			ready_2 ^= ready_2;
     	}
 
     }
@@ -501,6 +550,54 @@ static void MX_DAC_Init(void)
   /* USER CODE BEGIN DAC_Init 2 */
 
   /* USER CODE END DAC_Init 2 */
+
+}
+
+/**
+  * @brief SPI3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI3_Init(void)
+{
+
+  /* USER CODE BEGIN SPI3_Init 0 */
+
+  /* USER CODE END SPI3_Init 0 */
+
+  /* USER CODE BEGIN SPI3_Init 1 */
+
+  /* USER CODE END SPI3_Init 1 */
+  /* SPI3 parameter configuration*/
+  hspi3.Instance = SPI3;
+  hspi3.Init.Mode = SPI_MODE_MASTER;
+  hspi3.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi3.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi3.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi3.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi3.Init.NSS = SPI_NSS_SOFT;
+  hspi3.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
+  hspi3.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi3.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi3.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi3.Init.CRCPolynomial = 7;
+  hspi3.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
+  hspi3.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
+  if (HAL_SPI_Init(&hspi3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI3_Init 2 */
+    // Configure GPIOC pins : MISO, MOSI, CLK
+  GPIO_InitTypeDef  GPIO_InitStruct;
+  GPIO_InitStruct.Pin = GPIO_PIN_10 | GPIO_PIN_11 | GPIO_PIN_12;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF6_SPI3;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /* USER CODE END SPI3_Init 2 */
 
 }
 
@@ -679,6 +776,9 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(USB_PowerSwitchOn_GPIO_Port, USB_PowerSwitchOn_Pin, GPIO_PIN_RESET);
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(MY_SPI3_CS_GPIO_Port, MY_SPI3_CS_Pin, GPIO_PIN_SET);
+
   /*Configure GPIO pin : USER_Btn_Pin */
   GPIO_InitStruct.Pin = USER_Btn_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
@@ -718,6 +818,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(USB_OverCurrent_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : MY_SPI3_CS_Pin */
+  GPIO_InitStruct.Pin = MY_SPI3_CS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(MY_SPI3_CS_GPIO_Port, &GPIO_InitStruct);
+
 }
 
 /* USER CODE BEGIN 4 */
@@ -735,29 +842,22 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
     ready_1 = 1;
-//    HAL_GPIO_TogglePin(GPIOB, LD2_Pin);
     HAL_GPIO_WritePin(GPIOB, LD1_Pin, GPIO_PIN_SET);
-
-//    HAL_GPIO_WritePin(EXT_SRC_GPIO_Port, EXT_SRC_Pin, GPIO_PIN_SET);
 }
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     ready_2 = 1;
-//    HAL_GPIO_TogglePin(GPIOB, LD2_Pin);
     HAL_GPIO_WritePin(GPIOB, LD1_Pin, GPIO_PIN_RESET);
-//    HAL_GPIO_WritePin(EXT_SRC_GPIO_Port, EXT_SRC_Pin, GPIO_PIN_RESET);
 }
 
 void HAL_DAC_ConvHalfCpltCallbackCh1(DAC_HandleTypeDef *_hdac)
 {
-//    HAL_GPIO_TogglePin(GPIOB, LD3_Pin);
     HAL_GPIO_WritePin(GPIOB, LD2_Pin, GPIO_PIN_SET);
 }
 
 void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef *_hdac)
 {
-//    HAL_GPIO_TogglePin(GPIOB, LD3_Pin);
     HAL_GPIO_WritePin(GPIOB, LD2_Pin, GPIO_PIN_RESET);
 }
 
