@@ -44,7 +44,6 @@
 #include "arm_IIR_AllpassPhaser.h"
 #include "lp1_coeffs.h"
 #include "arm_IIR_LP.h"
-#include "sst26_flash.h"
 
 /* USER CODE END Includes */
 
@@ -136,36 +135,6 @@ static void MX_SPI3_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-uint32_t SPI_xfer(uint32_t ui32Base, uint8_t* inTxData, uint8_t* inRxData, uint32_t inLength, int8_t inFssHold)
-{
-    // Assert EN low
-    if ((SPI_HOLD_ACTIVE == inFssHold) || (SPI_HOLD_CLR == inFssHold))
-    {
-    	HAL_GPIO_WritePin(MY_SPI3_CS_GPIO_Port, MY_SPI3_CS_Pin, GPIO_PIN_RESET);
-    }
-
-    if (inTxData && !inRxData) // only TX
-    {
-    	HAL_SPI_Transmit(&hspi3, inTxData, inLength, HAL_MAX_DELAY);
-    }
-    else if (!inTxData && inRxData) // only RX
-    {
-    	HAL_SPI_Receive(&hspi3, inRxData, inLength, HAL_MAX_DELAY);
-    }
-    else // Both Tx and Rx
-    {
-		HAL_SPI_TransmitReceive(&hspi3, inTxData, inRxData, inLength, HAL_MAX_DELAY);
-    }
-
-    // De-assert EN on last byte
-    if ((inFssHold == SPI_HOLD_CLR))
-    {
-        HAL_GPIO_WritePin(MY_SPI3_CS_GPIO_Port, MY_SPI3_CS_Pin, GPIO_PIN_SET);
-    }
-
-    return 0;
-}
 
 
 /* USER CODE END 0 */
@@ -267,9 +236,9 @@ int main(void)
 	int buf_offset = 0;
 
 	// Threshold detection and Echo
-	float32_t max_val = 0;
-	uint32_t max_index = 0;
-	float32_t max_threshold = 0.1;
+//	float32_t max_val = 0;
+//	uint32_t max_index = 0;
+//	float32_t max_threshold = 0.1;
 
 	/* Call FIR init function to initialize the instance structure.
 	 * https://arm-software.github.io/CMSIS_5/DSP/html/arm_fir_example_f32_8c-example.html
