@@ -43,6 +43,7 @@
 //#include "AllpassPhaser.h"
 #include "arm_IIR_AllpassPhaser.h"
 #include "lp1_coeffs.h"
+#include "arm_IIR_LP.h"
 #include "sst26_flash.h"
 
 /* USER CODE END Includes */
@@ -107,13 +108,15 @@ uint16_t ready_2 = false;
 //IIR_HPF highpass_filt2;
 //IIR_Peak peak_filt1;
 //IIR_Peak peak_filt2;
-fDelay_TypeDef delay1;
+//fDelay_TypeDef delay1;
 //fTappedDelay_TypeDef tapped_delay1;
 //fFbComb_TypeDef fb_comb1;
 //AllpassPhaser_t phaser;
 
 ArmAllpassPhaser_t arm_phaser;
 float32_t dsp_buffer_dry[BLOCK_SIZE];
+
+ArmIIR_LPF_t arm_lpf;
 
 /* USER CODE END PV */
 
@@ -247,7 +250,7 @@ int main(void)
 //    float a2d_d2a_shift[BLOCK_SIZE];
 //    arm_fill_f32(2048.0 / 32768.0, a2d_d2a_shift, BLOCK_SIZE);
 
-    Delay_Init(&delay1, (uint32_t)(25000));
+//    Delay_Init(&delay1, (uint32_t)(25000));
 
 
     float f_depth = 0.90; // range from 0.25 to 1.0
@@ -267,10 +270,6 @@ int main(void)
 	float32_t max_val = 0;
 	uint32_t max_index = 0;
 	float32_t max_threshold = 0.1;
-	uint8_t th_reached = false;
-	bool echo_stored = false;
-	bool echo_complete = true;
-	bool flush_out = false;
 
 	/* Call FIR init function to initialize the instance structure.
 	 * https://arm-software.github.io/CMSIS_5/DSP/html/arm_fir_example_f32_8c-example.html
@@ -282,6 +281,9 @@ int main(void)
 	static float32_t firStateF32[BLOCK_SIZE + FLT1_NUM_TAPS - 1];
 #endif
 	arm_fir_init_f32(&Flt1, FLT1_NUM_TAPS, (float32_t *)&flt1_coeffs[0], &firStateF32[0], BLOCK_SIZE);
+
+
+	ArmIIR_LPF_Init(&arm_lpf);
 
   /* USER CODE END 2 */
 
@@ -321,65 +323,78 @@ int main(void)
 			arm_offset_f32(dsp_buffer+buf_offset, -0.5, ftmpdsp_buffer, BLOCK_SIZE);
 			arm_negate_f32(ftmpdsp_buffer, dsp_buffer+buf_offset, BLOCK_SIZE);
 
-			// Power threshold check
-			if (state_e == STAGE_1)
-			{
-				arm_abs_f32(dsp_buffer+buf_offset, ftmpdsp_buffer, BLOCK_SIZE);
-				arm_max_f32(ftmpdsp_buffer, BLOCK_SIZE, &max_val, &max_index);
-				if (max_val >= max_threshold)
-				{
-					HAL_GPIO_WritePin(EXT_SRC_GPIO_Port, EXT_SRC_Pin, GPIO_PIN_SET);
-					state_e = STAGE_2;
-				}
-				max_val = 0;
-			}
-			if (state_e == STAGE_2)
-			{
-				for (size_t n = buf_offset+max_index; n < buf_offset+BLOCK_SIZE; n++)
-				{
-					Delay_Step(&delay1, dsp_buffer[n]);
-					// Fill the buffer
-					if (delay1.position == 0)
-					{
-						HAL_GPIO_WritePin(EXT_SRC_GPIO_Port, EXT_SRC_Pin, 0);
-						state_e = STAGE_3;
-						break;
-					}
-				}
-				max_index = 0;
-			}
-
-
-			// BEGIN Signal Processing
-//			if (false)
+//			// Power threshold check
+//			if (state_e == STAGE_1)
 //			{
-//				ArmAllpassPhaser_StepBlock(&arm_phaser, dsp_buffer+buf_offset, dsp_buffer_dry, dsp_buffer+buf_offset, BLOCK_SIZE);
+//				arm_abs_f32(dsp_buffer+buf_offset, ftmpdsp_buffer, BLOCK_SIZE);
+//				arm_max_f32(ftmpdsp_buffer, BLOCK_SIZE, &max_val, &max_index);
+//				if (max_val >= max_threshold)
+//				{
+//					HAL_GPIO_WritePin(EXT_SRC_GPIO_Port, EXT_SRC_Pin, GPIO_PIN_SET); // indicate start of output
+//					state_e = STAGE_2;
+//				}
+//				max_val = 0;
+//			}
+//			if (state_e == STAGE_2)
+//			{
+//				for (size_t n = buf_offset+max_index; n < buf_offset+BLOCK_SIZE; n++)
+//				{
+//					Delay_Step(&delay1, dsp_buffer[n]);
+//					// Fill the buffer
+//					if (delay1.position == 0)
+//					{
+//						HAL_GPIO_WritePin(EXT_SRC_GPIO_Port, EXT_SRC_Pin, 0); // indicate start of output
+//						state_e = STAGE_3;
+//						break;
+//					}
+//				}
+//				max_index = 0;
+//			}
 //
+//
+//			// BEGIN Signal Processing
+////			if (false)
+////			{
+////				ArmAllpassPhaser_StepBlock(&arm_phaser, dsp_buffer+buf_offset, dsp_buffer_dry, dsp_buffer+buf_offset, BLOCK_SIZE);
+////
+////				for (size_t n = buf_offset; n < buf_offset+BLOCK_SIZE; n++)
+////				{
+////					dsp_buffer[n] = FbComb_Step(&fb_comb1, dsp_buffer[n]);
+////		//            	dsp_buffer[n] = Delay_Step(&delay1, dsp_buffer[n]);
+////		//            	data_log = dsp_buffer[n];
+////				}
+////			}
+//
+//			// END Signal Processing
+//
+//
+//			if (state_e == STAGE_3)
+//			{
+//				size_t k=0;
 //				for (size_t n = buf_offset; n < buf_offset+BLOCK_SIZE; n++)
 //				{
-//					dsp_buffer[n] = FbComb_Step(&fb_comb1, dsp_buffer[n]);
-//		//            	dsp_buffer[n] = Delay_Step(&delay1, dsp_buffer[n]);
-//		//            	data_log = dsp_buffer[n];
+//					out_buffer[k++] = Delay_Step(&delay1, 0.0);
+//					// Fill the buffer
+//					if (delay1.position == 0)
+//					{
+//						state_e = STAGE_4;
+//						break;
+//					}
 //				}
 //			}
 
-			// END Signal Processing
-			if (state_e == STAGE_3)
+			// Pipe input straight to output
+			size_t k=0;
+			HAL_GPIO_WritePin(EXT_SRC_GPIO_Port, EXT_SRC_Pin, GPIO_PIN_SET); // indicate start of output
+			for (size_t n = buf_offset; n < buf_offset+BLOCK_SIZE; n++)
 			{
-				size_t k=0;
-				for (size_t n = buf_offset; n < buf_offset+BLOCK_SIZE; n++)
-				{
-					out_buffer[k++] = Delay_Step(&delay1, 0.0);
-					// Fill the buffer
-					if (delay1.position == 0)
-					{
-						state_e = STAGE_4;
-						break;
-					}
-				}
+				out_buffer[k++] = dsp_buffer[n];
 			}
+			HAL_GPIO_WritePin(EXT_SRC_GPIO_Port, EXT_SRC_Pin, 0); // indicate end of output
 
-			arm_fir_f32(&Flt1, out_buffer, ftmpdsp_buffer, BLOCK_SIZE);
+//			arm_fir_f32(&Flt1, out_buffer, ftmpdsp_buffer, BLOCK_SIZE);
+
+			ArmIIR_LPF_StepBlock(&arm_lpf, out_buffer, ftmpdsp_buffer, BLOCK_SIZE);
 
 			arm_scale_f32(ftmpdsp_buffer, 2.0, dsp_buffer+buf_offset, BLOCK_SIZE);		// range is now from [-1.0, 1.0]
 			//arm_scale_f32(dsp_buffer+buf_offset, 2.0, dsp_buffer+buf_offset, BLOCK_SIZE);		// range is now from [-1.0, 1.0]
@@ -389,7 +404,7 @@ int main(void)
 
 			if (state_e == STAGE_4)
 			{
-				arm_fill_f32(0.0, out_buffer, BLOCK_SIZE);
+//				arm_fill_f32(0.0, out_buffer, BLOCK_SIZE);
 				state_e = STAGE_1;
 			}
 
